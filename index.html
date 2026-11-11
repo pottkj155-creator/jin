@@ -117,6 +117,13 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
 .live .last{color:#fff;font-size:15px;text-align:center;min-height:22px}
 .live .last b{font-family:var(--font-mono)}
 .live .close{background:#fff;color:#111;border:none;font:inherit;font-weight:700;font-size:17px;border-radius:12px;min-height:52px;cursor:pointer}
+.live .ctrls{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+.live .ctrls span{display:flex;gap:6px}
+.live .ctrls button{background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.55);border-radius:999px;padding:6px 14px;font:inherit;font-weight:600;min-height:40px;cursor:pointer}
+.live .ctrls button.on{background:#fff;color:#111}
+.live .caminfo{color:rgba(255,255,255,.6);font-size:11px;text-align:center}
+.live .focus-ring{position:absolute;width:70px;height:70px;margin:-35px 0 0 -35px;border:2px solid #ffd54a;border-radius:50%;pointer-events:none}
+.live .top-hint small{font-size:12px;opacity:.85}
 .live .top-hint{position:absolute;top:calc(16px + env(safe-area-inset-top,0px));left:0;right:0;text-align:center;color:#fff;font-size:14px;text-shadow:0 1px 3px #000}
 </style>
 </head>
@@ -177,9 +184,16 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
 <div class="live" id="live" hidden>
   <video id="video" playsinline muted></video>
   <div class="frame" id="frame"></div>
-  <div class="top-hint">라벨의 코드를 네모 안에 맞추면 자동으로 등록됩니다</div>
+  <div class="top-hint">코드를 네모 안에 맞추면 자동 등록<br><small>흐리면 조금 떨어져서 줌 사용 · 화면을 톡 누르면 초점</small></div>
+  <div class="focus-ring" id="focusRing" hidden></div>
   <div class="bar">
+    <div class="ctrls">
+      <span id="zoomBtns"></span>
+      <button type="button" id="torchBtn" hidden>플래시</button>
+      <button type="button" id="switchBtn" hidden>카메라 전환</button>
+    </div>
     <div class="last" id="liveLast">스캔 대기 중…</div>
+    <div class="caminfo" id="camInfo"></div>
     <button class="close" id="liveClose" type="button">스캔 종료</button>
   </div>
 </div>
@@ -441,18 +455,101 @@ async function startLive(){
     return;
   }
   try{
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}, audio:false});
+    stream = await openStream();          // 1) 권한 받기 + 카메라 이름 읽기
   }catch(e){
     toast("카메라를 열 수 없습니다. 브라우저 설정에서 카메라 권한을 허용해주세요."); return;
   }
-  const v = $("#video"); v.srcObject = stream; await v.play().catch(()=>{});
+  backCams = await listBackCams();
+  const cur = stream.getVideoTracks()[0].getSettings().deviceId;
+  if (backCams.length && backCams[0].deviceId && backCams[0].deviceId !== cur){
+    // 2) 메인(자동초점) 카메라로 다시 열기
+    stopStream();
+    try{ stream = await openStream(backCams[0].deviceId); camIdx = 0; }
+    catch(e){ stream = await openStream(); camIdx = Math.max(0, backCams.findIndex(d=>d.deviceId===cur)); }
+  } else camIdx = Math.max(0, backCams.findIndex(d=>d.deviceId===cur));
   $("#live").hidden = false; $("#liveLast").textContent = "스캔 대기 중…";
+  await attachStream();
   detector = await getNativeDetector();
   scanning = true; loop();
 }
+
+/* ----- 카메라 제어: 메인 카메라 · 연속 자동초점 · 줌 · 탭 초점 · 플래시 ----- */
+let backCams = [], camIdx = 0, track = null, caps = {}, torchOn = false;
+function openStream(deviceId){
+  const base = {width:{ideal:1920}, height:{ideal:1080}};
+  const video = deviceId ? Object.assign({deviceId:{exact:deviceId}}, base) : Object.assign({facingMode:{ideal:"environment"}}, base);
+  return navigator.mediaDevices.getUserMedia({video, audio:false});
+}
+function stopStream(){ if (stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; } }
+async function listBackCams(){
+  try{
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
+    const back = devs.filter(d=>/back|rear|environment|후면/i.test(d.label));
+    const list = (back.length ? back : devs).slice();
+    // 안드로이드는 보통 "camera2 0"이 메인(자동초점) 카메라, 광각·망원은 뒤로
+    const score = d => (/camera2? ?0\b/i.test(d.label) ? 10 : 0) - (/ultra|wide|광각|tele|망원/i.test(d.label) ? 5 : 0);
+    list.sort((a,b)=>score(b)-score(a));
+    return list;
+  }catch(e){ return []; }
+}
+async function attachStream(){
+  const v = $("#video"); v.srcObject = stream; await v.play().catch(()=>{});
+  track = stream.getVideoTracks()[0];
+  caps = (track.getCapabilities && track.getCapabilities()) || {};
+  torchOn = false;
+  if (caps.focusMode && caps.focusMode.includes("continuous")){
+    try{ await track.applyConstraints({advanced:[{focusMode:"continuous"}]}); }catch(e){}
+  }
+  const zb = $("#zoomBtns"); zb.innerHTML = "";
+  if (caps.zoom && caps.zoom.max > 1){
+    const levels = [1,2,3,4].filter(z=>z>=caps.zoom.min && z<=caps.zoom.max);
+    zb.innerHTML = levels.map(z=>`<button type="button" data-z="${z}">${z}x</button>`).join("");
+    await setZoom(Math.min(2, caps.zoom.max));
+  }
+  $("#torchBtn").hidden = !caps.torch; $("#torchBtn").classList.remove("on");
+  $("#switchBtn").hidden = backCams.length < 2;
+  const label = (track.label||"카메라").replace(/\(.*?\)/g,"").trim().slice(0,30);
+  const af = caps.focusMode ? (caps.focusMode.includes("continuous") ? "자동초점 ✓" : "자동초점 ✗") : "초점정보 없음";
+  $("#camInfo").textContent = `${label} · ${af}${caps.zoom ? " · 줌 최대 " + caps.zoom.max + "x" : ""}`;
+}
+async function setZoom(z){
+  try{ await track.applyConstraints({advanced:[{zoom:z}]}); }catch(e){}
+  document.querySelectorAll("#zoomBtns button").forEach(b=>b.classList.toggle("on", +b.dataset.z===z));
+}
+$("#zoomBtns").addEventListener("click", e=>{ const b = e.target.closest("button"); if (b) setZoom(+b.dataset.z); });
+$("#torchBtn").addEventListener("click", async ()=>{
+  torchOn = !torchOn;
+  try{ await track.applyConstraints({advanced:[{torch:torchOn}]}); }catch(e){ torchOn = false; }
+  $("#torchBtn").classList.toggle("on", torchOn);
+});
+$("#switchBtn").addEventListener("click", async ()=>{
+  if (backCams.length < 2) return;
+  camIdx = (camIdx + 1) % backCams.length;
+  stopStream();
+  try{ stream = await openStream(backCams[camIdx].deviceId); }catch(e){ stream = await openStream(); }
+  await attachStream();
+});
+// 화면을 톡 누르면 그 위치에 초점
+$("#video").addEventListener("click", async e=>{
+  if (!track) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  const ring = $("#focusRing"); ring.style.left = e.clientX + "px"; ring.style.top = e.clientY + "px"; ring.hidden = false;
+  setTimeout(()=>ring.hidden = true, 900);
+  const modes = caps.focusMode || [];
+  const point = {x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height};
+  try{
+    const c = {};
+    if (caps.pointsOfInterest !== undefined || "pointsOfInterest" in (track.getSettings ? track.getSettings() : {})) c.pointsOfInterest = [point];
+    if (modes.includes("single-shot")) c.focusMode = "single-shot";
+    else if (modes.includes("continuous")) c.focusMode = "continuous";
+    if (Object.keys(c).length) await track.applyConstraints({advanced:[c]});
+    if (c.focusMode === "single-shot" && modes.includes("continuous"))
+      setTimeout(()=>track && track.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(()=>{}), 1500);
+  }catch(err){}
+});
 function stopLive(){
   scanning = false;
-  if (stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  stopStream(); track = null;
   $("#live").hidden = true; $("#video").srcObject = null;
   render();
 }
@@ -660,7 +757,7 @@ document.addEventListener("visibilitychange", ()=>{ if (!document.hidden) refres
   } else zx = "✗(미로드)";
   parts.push("zxing " + zx);
   parts.push("jsQR " + (window.jsQR ? "✓" : "✗"));
-  $("#diag").textContent = "v5 · " + parts.join(" · ");
+  $("#diag").textContent = "v6 · " + parts.join(" · ");
 })();
 window.__test = {parseQR, status, demoApi};
 refresh(true);
