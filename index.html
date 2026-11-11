@@ -15,6 +15,8 @@
    구글 시트 안(Apps Script)에서 열 때는 비워둬도 됩니다.
    ============================================================ */
 const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwmGtAw9wSR8dV65oByhA7haiLI2SAnWPfl_ECwkVA6AcaSJkngi8GbSL4t-dL1kIj8bA/exec";
+// 실시간 스캔판 주소 (구글 화면에서 "실시간 스캔판 열기" 버튼이 이 주소로 이동)
+const LIVE_URL = "https://pottkj155-creator.github.io/jin/";
 </script>
 <style>
 :root{
@@ -56,6 +58,9 @@ h1{margin:0;font-size:18px;font-weight:700;letter-spacing:-.01em}
 .btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-size:17px;min-height:56px;display:flex;align-items:center;justify-content:center;gap:10px}
 .btn.secondary{display:flex;align-items:center;justify-content:center;gap:8px;border-color:var(--accent);color:var(--accent)}
 .btn:disabled{opacity:.5;cursor:default}
+a.btn{text-decoration:none}
+.export{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px}
+.export a{color:var(--accent);text-underline-offset:3px}
 .btnrow{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .row{display:flex;gap:8px}
 .row input{flex:1;min-width:0}
@@ -133,6 +138,10 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M4 12h16"/></svg>
       실시간 스캔 시작
     </button>
+    <a class="btn primary" id="liveLink" href="#" target="_blank" rel="noopener" hidden>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M4 12h16"/></svg>
+      실시간 스캔판 열기 ↗
+    </a>
     <div class="btnrow">
       <label class="btn secondary" for="cam">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg>
@@ -156,6 +165,11 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
 
   <div class="tools">
     <input type="search" id="q" placeholder="형번·로트·시리얼·비고 검색">
+    <button class="btn" id="exportBtn" type="button">엑셀 받기</button>
+  </div>
+  <div class="export" id="exportLinks" hidden>
+    <a id="sheetLink" href="#" target="_blank" rel="noopener">구글 시트 열기 ↗</a>
+    <a id="xlsxLink" href="#" target="_blank" rel="noopener">엑셀(xlsx) 전체 받기 ↗</a>
   </div>
   <div class="list" id="list"><div class="empty">불러오는 중…</div></div>
 </main>
@@ -410,11 +424,22 @@ $("#manual").addEventListener("submit", e=>{
 
 /* ---------- 실시간 스캔 (외부 호스팅판에서만) ---------- */
 let stream = null, scanning = false, detector = null, lastCode = "", lastCodeAt = 0, handling = false;
-const canLive = !IS_GAS && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.isSecureContext;
-if (canLive) $("#liveBtn").hidden = false;
+const canLive = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.isSecureContext);
+if (IS_GAS){
+  // 구글 화면 안에서는 카메라가 막혀 있으므로 실시간 스캔판으로 연결
+  if (LIVE_URL){ const a = $("#liveLink"); a.href = LIVE_URL; a.hidden = false; }
+} else {
+  $("#liveBtn").hidden = false;
+}
 $("#liveBtn").addEventListener("click", startLive);
 $("#liveClose").addEventListener("click", stopLive);
 async function startLive(){
+  if (!canLive){
+    toast(/KAKAOTALK|NAVER|Line\//i.test(navigator.userAgent)
+      ? "이 앱 안의 브라우저에서는 카메라를 쓸 수 없습니다. ⋮ 메뉴 → 다른 브라우저(크롬)로 열어주세요."
+      : "이 브라우저에서는 카메라를 쓸 수 없습니다. 크롬으로 열어주세요.");
+    return;
+  }
   try{
     stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}, audio:false});
   }catch(e){
@@ -571,6 +596,42 @@ $("#list").addEventListener("click", e=>{
   render(true);
 });
 
+/* ---------- 데이터 내보내기 (CSV: 엑셀·구글시트·휴대폰 모두 열림) ---------- */
+$("#exportBtn").addEventListener("click", ()=>{
+  const list = (window.__shown && window.__shown.length) ? window.__shown : items;
+  if (!list.length){ toast("내보낼 기록이 없습니다."); return; }
+  const q = v => `"${String(v ?? "").replace(/"/g,'""')}"`;
+  const p = n => String(n).padStart(2,"0");
+  const dt = t => { const d = new Date(t); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+  const rows = [["입고시간","형번","로트","시리얼","1차","2차","3차","판정","비고"]];
+  [...list].sort((a,b)=>a.scannedAt-b.scannedAt).forEach(i=>{
+    const r = i.results||[];
+    rows.push([dt(i.scannedAt), i.model, i.lot, i.serial, r[0]||"", r[1]||"", r[2]||"", LABEL[status(r)], i.note||""]);
+  });
+  // 형번·로트가 숫자/날짜로 바뀌지 않도록 ="..." 형태로 저장
+  const csv = "﻿" + rows.map((r,ri)=>r.map((v,ci)=> ri>0 && (ci===1||ci===2) ? `="${String(v).replace(/"/g,'""')}"` : q(v)).join(",")).join("\r\n");
+  const now = new Date();
+  const name = `샘플시험기록_${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}.csv`;
+  try{
+    const url = URL.createObjectURL(new Blob([csv], {type:"text/csv;charset=utf-8"}));
+    const a = document.createElement("a"); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+    toast(`${list.length}건 내보냄 (${name})`);
+  }catch(e){ toast("파일을 만들지 못했습니다."); }
+});
+// 구글 시트 / xlsx 링크 (시트 주인 계정으로 로그인되어 있어야 열림)
+async function loadLinks(){
+  if (MODE === "demo") return;
+  try{
+    const r = await callServer({action:"info"});
+    if (r && r.ok && r.sheetUrl){
+      $("#sheetLink").href = r.sheetUrl; $("#xlsxLink").href = r.xlsxUrl;
+      $("#exportLinks").hidden = false;
+    }
+  }catch(e){}
+}
+
 let tt = null;
 function toast(t){ const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(tt); tt = setTimeout(()=>el.hidden = true, 2600); }
 
@@ -599,10 +660,11 @@ document.addEventListener("visibilitychange", ()=>{ if (!document.hidden) refres
   } else zx = "✗(미로드)";
   parts.push("zxing " + zx);
   parts.push("jsQR " + (window.jsQR ? "✓" : "✗"));
-  $("#diag").textContent = "v4 · " + parts.join(" · ");
+  $("#diag").textContent = "v5 · " + parts.join(" · ");
 })();
 window.__test = {parseQR, status, demoApi};
 refresh(true);
+loadLinks();
 })();
 </script>
 </body>
