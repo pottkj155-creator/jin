@@ -118,6 +118,19 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
 .live .last{color:#fff;font-size:15px;text-align:center;min-height:22px}
 .live .last b{font-family:var(--font-mono)}
 .live .close{background:#fff;color:#111;border:none;font:inherit;font-weight:700;font-size:17px;border-radius:12px;min-height:52px;cursor:pointer}
+.summary{margin-top:16px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.summary h2{margin:0;font-size:15px;font-weight:700}
+.sumhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.sumhead span{font-size:12px;color:var(--muted)}
+.tablewrap{overflow-x:auto}
+.sumtable{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+.sumtable th{font-size:11px;font-weight:600;color:var(--muted);text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.sumtable th:first-child,.sumtable td:first-child{text-align:left}
+.sumtable td{text-align:right;padding:6px;border-bottom:1px solid var(--line);font-family:var(--font-mono);white-space:nowrap}
+.sumtable tr.total td{font-weight:700;border-bottom:none}
+.sumtable .p{color:var(--pass)} .sumtable .f{color:var(--fail)} .sumtable .w{color:var(--wait)}
+.sumtable .zero{color:var(--muted);opacity:.6}
+.btn.close-day{border-color:var(--fail);color:var(--fail);font-size:14px}
 .rw{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--accent-soft);color:var(--accent);margin-left:6px;font-family:var(--font-body)}
 .link.rework{color:var(--accent);font-weight:600}
 .modal{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;padding:16px max(16px,env(safe-area-inset-left,0px)) calc(16px + env(safe-area-inset-bottom,0px))}
@@ -177,6 +190,12 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
     <p class="hint" id="diag">v4 · 해독 기능 확인 중…</p>
   </section>
 
+  <section class="summary" aria-label="형번별 종합">
+    <div class="sumhead"><h2>형번별 종합</h2><span id="sumNote">샘플별 최근 회차 기준</span></div>
+    <div class="tablewrap"><table class="sumtable" id="sumTable"></table></div>
+    <button class="btn close-day" id="closeBtn" type="button">하루 마감 (엑셀 저장 → 목록 비우기)</button>
+  </section>
+
   <div class="tools">
     <input type="search" id="q" placeholder="형번·로트·시리얼·비고 검색">
     <button class="btn" id="exportBtn" type="button">엑셀 받기</button>
@@ -209,6 +228,15 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
     <div class="btnrow">
       <button class="btn" type="button" id="rwCancel">취소</button>
       <button class="btn primary" type="button" id="rwOk">재측정 등록</button>
+    </div>
+  </div>
+</div>
+<div class="modal" id="closeModal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="closeText">
+    <p id="closeText"></p>
+    <div class="btnrow">
+      <button class="btn" type="button" id="closeCancel">취소</button>
+      <button class="btn primary" type="button" id="closeOk">엑셀 저장하고 비우기</button>
     </div>
   </div>
 </div>
@@ -311,6 +339,7 @@ function demoApi(req){
     case "undo": if (it){ it.results.pop(); save(); } return out({ok:true});
     case "note": if (it){ it.note = String(req.text||""); save(); } return out({ok:true});
     case "del": list = list.filter(i => i.id !== req.id); save(); return out({ok:true});
+    case "closeDay": { const n = list.length; list = []; save(); return out({ok:true, archived:n, sheet:"(체험 모드)"}); }
   }
   return out({ok:false, msg:"알 수 없는 요청"});
 }
@@ -686,18 +715,42 @@ function render(force){
       <div class="note"><label for="note-${idx}">비고</label>
         <textarea class="noteInput" id="note-${idx}" data-i="${idx}" rows="1" placeholder="특이사항 입력">${esc(i.note||"")}</textarea></div>
       <div class="actions">
-        ${latestIn(items, i.raw)===i && !i.saving ? `<button class="link rework" data-a="rework" data-i="${idx}">↻ 재측정(리워크) 등록</button>`:""}
+        ${latestIn(items, i.raw)===i ? `<button class="link rework" data-a="rework" data-i="${idx}">↻ 재측정(리워크) 등록</button>`:""}
         ${r.length?`<button class="link" data-a="undo" data-i="${idx}">마지막 기록 취소</button>`:""}
         <button class="link danger" data-a="del" data-i="${idx}">삭제</button></div></article>`;
   }).join("");
   flashId = null;
 }
+// 형번별 종합: 같은 샘플(코드)은 가장 최근 회차만 셈
+function summarize(list){
+  const latest = new Map();
+  list.forEach(i=>{ const l = latest.get(i.raw); if (!l || (i.rework||0) > (l.rework||0)) latest.set(i.raw, i); });
+  const by = new Map();
+  latest.forEach(i=>{
+    const m = by.get(i.model) || {model:i.model, received:0, pass:0, fail:0, wait:0, rework:0};
+    const s = status(i.results);
+    m.received++;
+    if (s==="pass") m.pass++; else if (s==="fail") m.fail++; else m.wait++;
+    if (i.rework) m.rework++;
+    by.set(i.model, m);
+  });
+  const rows = [...by.values()].sort((a,b)=>a.model.localeCompare(b.model));
+  const total = rows.reduce((t,r)=>({model:"합계", received:t.received+r.received, pass:t.pass+r.pass, fail:t.fail+r.fail, wait:t.wait+r.wait, rework:t.rework+r.rework}),
+    {model:"합계", received:0, pass:0, fail:0, wait:0, rework:0});
+  return {rows, total};
+}
+function passRate(r){ const d = r.pass + r.fail; return d ? Math.round(r.pass / d * 1000) / 10 + "%" : "-"; }
 function updateCounts(){
-  const st = items.map(i=>status(i.results));
-  $("#c-all").textContent = items.length;
-  $("#c-todo").textContent = st.filter(s=>s==="wait"||s==="retest").length;
-  $("#c-pass").textContent = st.filter(s=>s==="pass").length;
-  $("#c-fail").textContent = st.filter(s=>s==="fail").length;
+  const {rows, total} = summarize(items);
+  $("#c-all").textContent = total.received;
+  $("#c-todo").textContent = total.wait;
+  $("#c-pass").textContent = total.pass;
+  $("#c-fail").textContent = total.fail;
+  const n = (v, cls) => `<td class="${v ? cls : "zero"}">${v}</td>`;
+  $("#sumTable").innerHTML = rows.length
+    ? `<thead><tr><th>형번</th><th>수령</th><th>PASS</th><th>FAIL</th><th>측정중</th><th>리워크</th><th>합격률</th></tr></thead><tbody>` +
+      [...rows, total].map(r=>`<tr class="${r===total?"total":""}"><td>${esc(r.model)}</td><td>${r.received}</td>${n(r.pass,"p")}${n(r.fail,"f")}${n(r.wait,"w")}<td>${r.rework}</td><td>${passRate(r)}</td></tr>`).join("") + `</tbody>`
+    : `<tbody><tr><td style="color:var(--muted);font-family:var(--font-body)">아직 등록된 샘플이 없습니다.</td></tr></tbody>`;
 }
 function flash(id){
   flashId = id; render(true);
@@ -749,9 +802,9 @@ $("#list").addEventListener("click", e=>{
 });
 
 /* ---------- 데이터 내보내기 (CSV: 엑셀·구글시트·휴대폰 모두 열림) ---------- */
-$("#exportBtn").addEventListener("click", ()=>{
-  const list = (window.__shown && window.__shown.length) ? window.__shown : items;
-  if (!list.length){ toast("내보낼 기록이 없습니다."); return; }
+// list: 내보낼 기록, tag: 파일 이름에 붙일 말(예: "마감"). 성공하면 true
+function exportFile(list, tag){
+  if (!list.length){ toast("내보낼 기록이 없습니다."); return false; }
   const q = v => `"${String(v ?? "").replace(/"/g,'""')}"`;
   const p = n => String(n).padStart(2,"0");
   const dt = t => { const d = new Date(t); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
@@ -761,16 +814,32 @@ $("#exportBtn").addEventListener("click", ()=>{
     rows.push([dt(i.scannedAt), i.model, i.lot, i.serial, i.rework||0, r[0]||"", r[1]||"", r[2]||"", LABEL[status(r)], i.note||""]);
   });
   const now = new Date();
-  const base = `샘플시험기록_${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}`;
-  // 1순위: 진짜 엑셀(.xlsx) 파일 — 권한 필요 없음
+  const base = `샘플시험기록_${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}${tag ? "_" + tag : ""}`;
+  // 1순위: 진짜 엑셀(.xlsx) 파일 — 권한 필요 없음. 첫 시트 "종합", 둘째 시트 "기록"
   if (window.XLSX){
     try{
-      const ws = XLSX.utils.aoa_to_sheet(rows);
-      ws["!cols"] = [{wch:17},{wch:11},{wch:15},{wch:13},{wch:7},{wch:5},{wch:5},{wch:5},{wch:9},{wch:30}];
-      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "기록");
+      const {rows: sr, total} = summarize(list);
+      const times = list.map(i=>i.scannedAt).sort((a,b)=>a-b);
+      const sum = [
+        ["샘플 입고 시험 종합"],
+        ["입고 기간", `${dt(times[0])} ~ ${dt(times[times.length-1])}`],
+        ["작성 시각", dt(now.getTime())],
+        ["기준", "같은 샘플은 가장 최근 회차(리워크 포함) 결과로 1개만 셈"],
+        [],
+        ["형번","수령","PASS","FAIL","측정중","리워크","합격률"],
+        ...[...sr, total].map(r=>[r.model, r.received, r.pass, r.fail, r.wait, r.rework, passRate(r)])
+      ];
+      const ws1 = XLSX.utils.aoa_to_sheet(sum);
+      ws1["!cols"] = [{wch:14},{wch:8},{wch:8},{wch:8},{wch:8},{wch:8},{wch:9}];
+      ws1["!merges"] = [{s:{r:0,c:0}, e:{r:0,c:6}}, {s:{r:3,c:1}, e:{r:3,c:6}}];
+      const ws2 = XLSX.utils.aoa_to_sheet(rows);
+      ws2["!cols"] = [{wch:17},{wch:11},{wch:15},{wch:13},{wch:7},{wch:5},{wch:5},{wch:5},{wch:9},{wch:30}];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws1, "종합");
+      XLSX.utils.book_append_sheet(wb, ws2, "기록");
       XLSX.writeFile(wb, base + ".xlsx");
       toast(`${list.length}건 내보냄 (${base}.xlsx)`);
-      return;
+      return true;
     }catch(e){}
   }
   // 2순위: CSV (형번·로트가 숫자/날짜로 바뀌지 않도록 ="..." 형태)
@@ -782,7 +851,38 @@ $("#exportBtn").addEventListener("click", ()=>{
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url), 10000);
     toast(`${list.length}건 내보냄 (${name})`);
-  }catch(e){ toast("파일을 만들지 못했습니다."); }
+    return true;
+  }catch(e){ toast("파일을 만들지 못했습니다."); return false; }
+}
+$("#exportBtn").addEventListener("click", ()=>{
+  exportFile((window.__shown && window.__shown.length) ? window.__shown : items, "");
+});
+
+/* ---------- 하루 마감: 엑셀 저장 → 구글 시트 "보관_날짜" 시트로 옮기고 목록 비우기 ---------- */
+$("#closeBtn").addEventListener("click", ()=>{
+  if (!items.length){ toast("마감할 기록이 없습니다."); return; }
+  const {total} = summarize(items);
+  $("#closeText").innerHTML = `<b>하루 마감</b><br><br>
+    샘플 <b>${total.received}개</b> (기록 ${items.length}건) · PASS ${total.pass} · FAIL ${total.fail} · 측정중 ${total.wait}<br><br>
+    1) 전체 기록을 엑셀 파일로 저장하고<br>2) 목록을 비웁니다.<br><br>
+    <small style="color:var(--muted)">비운 기록은 구글 시트의 '보관_날짜' 시트에 남습니다. 같은 링크를 쓰는 다른 사람의 목록도 함께 비워집니다.</small>
+    ${total.wait ? `<br><br><b style="color:var(--wait)">⚠ 아직 측정이 끝나지 않은 샘플이 ${total.wait}개 있습니다.</b>` : ""}`;
+  $("#closeModal").hidden = false;
+});
+$("#closeCancel").addEventListener("click", ()=>{ $("#closeModal").hidden = true; });
+$("#closeOk").addEventListener("click", async ()=>{
+  $("#closeModal").hidden = true;
+  showProgress("저장 중인 기록을 마무리하는 중…");
+  await chain;                                   // 저장 대기 중인 기록 먼저 처리
+  const snapshot = items.slice();
+  const saved = exportFile(snapshot, "마감");
+  if (!saved){ hideProgress(); toast("엑셀 파일을 만들지 못해 마감을 취소했습니다."); return; }
+  showProgress("목록 비우는 중…");
+  enqueue({action:"closeDay"}, res=>{
+    hideProgress();
+    if (res && res.ok) toast(`마감 완료: ${res.archived}건을 '${res.sheet}' 시트에 보관했습니다.`);
+  });
+  items = []; render(true);
 });
 // 구글 시트 / xlsx 링크 (시트 주인 계정으로 로그인되어 있어야 열림)
 async function loadLinks(){
@@ -824,7 +924,7 @@ document.addEventListener("visibilitychange", ()=>{ if (!document.hidden) refres
   } else zx = "✗(미로드)";
   parts.push("zxing " + zx);
   parts.push("jsQR " + (window.jsQR ? "✓" : "✗"));
-  $("#diag").textContent = "v9 · " + parts.join(" · ");
+  $("#diag").textContent = "v10 · " + parts.join(" · ");
 })();
 window.__test = {parseQR, status, demoApi};
 refresh(true);
