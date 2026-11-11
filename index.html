@@ -208,7 +208,7 @@ input[type=text],input[type=search]{font:inherit;font-family:var(--font-mono);fo
     <p id="rwText"></p>
     <div class="btnrow">
       <button class="btn" type="button" id="rwCancel">취소</button>
-      <button class="btn primary" type="button" id="rwOk">리워크 등록</button>
+      <button class="btn primary" type="button" id="rwOk">재측정 등록</button>
     </div>
   </div>
 </div>
@@ -276,8 +276,8 @@ function parseQR(text){
   if (f.length < 3) return null;
   const p0 = f[0];
   const model = p0.includes("-") ? p0.slice(p0.indexOf("-")+1) : p0;
-  const lot = f[2].replace(/\D/g,"").slice(-3);
-  if (!model || lot.length < 3) return null;
+  const lot = f[2];
+  if (!model || !lot) return null;
   return { raw:s, model, lot, serial:f[3]||"" };
 }
 function demoApi(req){
@@ -291,9 +291,7 @@ function demoApi(req){
     const last = latestIn(list, p.raw);
     let round = 0;
     if (last){
-      const failed = status(last.results) === "fail";
-      if (!rework) return {ok:false, dup:true, id:last.id, canRework:failed};
-      if (!failed) return {ok:false, msg:"FAIL로 끝난 샘플만 리워크로 다시 등록할 수 있습니다."};
+      if (!rework) return {ok:false, dup:true, id:last.id, canRework:true};
       round = (last.rework||0) + 1;
     }
     const id = round ? p.raw + "#R" + round : p.raw;
@@ -341,9 +339,7 @@ function addLocal(text, rework){
   const last = latestIn(items, p.raw);
   let round = 0;
   if (last){
-    const failed = status(last.results) === "fail";
-    if (!rework) return {dup:true, item:last, canRework:failed};
-    if (!failed) return {notFail:true, item:last};
+    if (!rework) return {dup:true, item:last, canRework:true};
     round = (last.rework||0) + 1;
   }
   const id = round ? p.raw + "#R" + round : p.raw;
@@ -364,7 +360,6 @@ function register(text){
 // 리워크 재등록 (FAIL 샘플만)
 function doRework(item){
   const r = addLocal(item.raw, true);
-  if (r.notFail){ toast("FAIL로 끝난 샘플만 리워크로 다시 등록할 수 있습니다."); return; }
   if (!r.ok) return;
   toast(`리워크 ${r.item.rework}회 등록: ${r.item.model} / 로트 ${r.item.lot}`);
   flash(r.item.id);
@@ -374,7 +369,8 @@ function doRework(item){
 let rwTarget = null, rwOpen = false;
 function askRework(item){
   rwTarget = item; rwOpen = true;
-  $("#rwText").innerHTML = `<b>${esc(item.model)} / 로트 ${esc(item.lot)}</b>${item.rework ? ` (리워크 ${item.rework}회)` : ""}은(는) <b style="color:var(--fail)">FAIL</b>로 끝난 샘플입니다.<br>리워크로 다시 등록할까요?`;
+  const s = status(item.results);
+  $("#rwText").innerHTML = `이미 등록된 샘플입니다.<br><b>${esc(item.model)} / 로트 ${esc(item.lot)}</b>${item.rework ? ` (리워크 ${item.rework}회)` : ""} · 현재 <span class="pill ${s}">${LABEL[s]}</span><br><br>재측정(리워크)으로 새로 등록할까요?<br><small style="color:var(--muted)">이전 기록은 그대로 남습니다. 실수로 다시 찍었다면 취소를 누르세요.</small>`;
   $("#rwModal").hidden = false;
 }
 function closeRework(){ $("#rwModal").hidden = true; rwOpen = false; rwTarget = null; }
@@ -480,7 +476,7 @@ $("#multi").addEventListener("change", async e=>{
   render();
   if (raws.length) enqueue({action:"addMany", raws});
   let msg = `${raws.length}건 등록`;
-  if (dup) msg += ` · 중복 ${dup}건 제외${failDup ? ` (FAIL 이력 ${failDup}건은 카드의 '리워크 재등록'으로)` : ""}`;
+  if (dup) msg += ` · 이미 등록된 ${dup}건 제외 (재측정은 카드의 '재측정(리워크) 등록' 버튼으로)`;
   if (failed.length) msg += ` · 인식 실패 ${failed.length}장 (${failed.slice(0,8).join(", ")}번째${failed.length>8?" 등":""})`;
   showProgress(msg); setTimeout(hideProgress, 6000);
 });
@@ -631,7 +627,7 @@ async function loop(){
       $("#frame").classList.add("hit"); if (navigator.vibrate) navigator.vibrate(80);
       const r = register(text);
       $("#liveLast").innerHTML = r.ok ? `✓ 등록: <b>${esc(r.item.model)}</b> / 로트 <b>${esc(r.item.lot)}</b>`
-        : r.dup && r.canRework ? `FAIL 이력: <b>${esc(r.item.model)}</b> / <b>${esc(r.item.lot)}</b> — 리워크 여부 선택`
+        : r.dup && r.canRework ? `이미 등록됨: <b>${esc(r.item.model)}</b> / <b>${esc(r.item.lot)}</b> — 재측정 여부 선택`
         : r.dup ? `이미 등록됨: <b>${esc(r.item.model)}</b> / <b>${esc(r.item.lot)}</b>` : "코드 형식이 다릅니다";
       setTimeout(()=>{ $("#frame").classList.remove("hit"); handling = false; }, 700);
     }
@@ -690,7 +686,7 @@ function render(force){
       <div class="note"><label for="note-${idx}">비고</label>
         <textarea class="noteInput" id="note-${idx}" data-i="${idx}" rows="1" placeholder="특이사항 입력">${esc(i.note||"")}</textarea></div>
       <div class="actions">
-        ${s==="fail" && latestIn(items, i.raw)===i ? `<button class="link rework" data-a="rework" data-i="${idx}">↻ 리워크 재등록</button>`:""}
+        ${latestIn(items, i.raw)===i && !i.saving ? `<button class="link rework" data-a="rework" data-i="${idx}">↻ 재측정(리워크) 등록</button>`:""}
         ${r.length?`<button class="link" data-a="undo" data-i="${idx}">마지막 기록 취소</button>`:""}
         <button class="link danger" data-a="del" data-i="${idx}">삭제</button></div></article>`;
   }).join("");
@@ -770,7 +766,7 @@ $("#exportBtn").addEventListener("click", ()=>{
   if (window.XLSX){
     try{
       const ws = XLSX.utils.aoa_to_sheet(rows);
-      ws["!cols"] = [{wch:17},{wch:11},{wch:6},{wch:13},{wch:7},{wch:5},{wch:5},{wch:5},{wch:9},{wch:30}];
+      ws["!cols"] = [{wch:17},{wch:11},{wch:15},{wch:13},{wch:7},{wch:5},{wch:5},{wch:5},{wch:9},{wch:30}];
       const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "기록");
       XLSX.writeFile(wb, base + ".xlsx");
       toast(`${list.length}건 내보냄 (${base}.xlsx)`);
@@ -828,7 +824,7 @@ document.addEventListener("visibilitychange", ()=>{ if (!document.hidden) refres
   } else zx = "✗(미로드)";
   parts.push("zxing " + zx);
   parts.push("jsQR " + (window.jsQR ? "✓" : "✗"));
-  $("#diag").textContent = "v7 · " + parts.join(" · ");
+  $("#diag").textContent = "v9 · " + parts.join(" · ");
 })();
 window.__test = {parseQR, status, demoApi};
 refresh(true);
